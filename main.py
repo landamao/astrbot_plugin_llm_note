@@ -106,11 +106,6 @@ class Main(Star):
         # 合并拼接提示词
         req.prompt += "\n".join(prompt_segments)
 
-    @filter.command("修改笔记")
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def 指令_修改笔记(self, event: AstrMessageEvent):
-        """修改笔记：支持基础的管理端文本直接操作指令（暂未实现）"""
-
     @filter.llm_tool(name="edit_user_note")
     async def llm_修改笔记(
             self,
