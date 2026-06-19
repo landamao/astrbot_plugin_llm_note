@@ -482,11 +482,36 @@ class Main(Star):
         Returns:
             匹配到的用户 ID 及昵称列表（可能多个）。
         """
-        result = {}
         group_id = event.get_group_id()
         if not group_id:
             return "当前为私聊，无需搜索，该用户ID固定为：" + event.get_sender_id()
+
+        # 针对 AiocqhttpMessageEvent 实时调用 OneBot API
+        if type(event).__name__ == "AiocqhttpMessageEvent":
+            try:
+                members = await event.bot.call_action(
+                    'get_group_member_list',
+                    group_id=group_id
+                )
+                result = {}
+                for member in members:
+                    # 优先使用群名片，若无则用昵称
+                    name = member.get('card') or member.get('nickname') or ''
+                    if not name:
+                        continue
+                    if user_name in name or name in user_name:
+                        result[member['user_id']] = name
+
+                if result:
+                    return '\n'.join(f"用户{name}的ID为：{_id}" for _id, name in result.items())
+                # 若 API 返回空结果，也走缓存逻辑（可选）
+            except Exception:
+                # 调用失败时静默回退到缓存
+                pass
+
+        # 原有缓存逻辑（私聊已提前返回，此处仅在群聊且非 API 或 API 失败时执行）
         group_data = self.user_info_cache.get(group_id, {})
+        result = {}
         for _id, name in group_data.items():
             if user_name in name or name in user_name:
                 result[_id] = name
