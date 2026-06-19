@@ -1,0 +1,8 @@
+{
+  "无": {
+    "description": "暂无配置",
+    "type": "string",
+    "default": "",
+    "hint": ""
+  }
+}
