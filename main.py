@@ -235,9 +235,10 @@ class Main(Star):
                 操作群 = True
             else:
                 操作ID = 用户ID
+        操作ID = str(操作ID)
         时间 = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
         if 操作群:
-            删除前数据 = self.note.get_group_note(group_id)
+            删除前数据 = self.note.get_group_note(操作ID)
             删除前文件 = f"data_群{操作ID}删除前数据_{时间}.json"
             self.note.write_json_to_file(删除前数据, 删除前文件)
             self.note.del_group_note(操作ID)
@@ -264,7 +265,9 @@ class Main(Star):
             文件是群数据 = False
         else:
             return #理论上不存在，因为前面已经`startswith(("data_私", "data_群"))`了
-        识别ID = file_name[len("data_私"):]
+        import re
+        识别ID = re.match(r'\d+', file_name[len("data_私"):]).group()
+        识别ID = str(识别ID)
         if 文件是群数据:
             if not event.is_admin():
                 yield event.plain_result("❌️ 只有管理员可以操作群数据")
@@ -297,7 +300,7 @@ class Main(Star):
         为用户记录笔记
         批量修改笔记列表（支持按索引增、删、改），笔记总数不超过20条，若超出，则会自动删掉最前面的，请合理规划笔记内容
         **隐私保护**，笔记内容对所有用户都不可见，仅对你可见，你可以选择性透露给用户，可记录好感度，关系，印象，用户偏好，信息等
-        批量操作无索引位移：在一次调用中同时进行删除、插入等操作时，所有操作基于原始索引执行，无需担心索引位移问题。内部实现先标记删除/替换（None 占位），再从大到小插入，最后统一清理占位符。
+        批量操作无索引位移：在一次调用中同时进行删除、插入等操作时，所有操作基于原始索引执行，无需担心索引位移问题。内部实现先标记删除/替换（None 占位），再按原始索引顺序重组列表，最后统一清理占位符。
         Args:
             user_id(string): 用户ID，不填默认为当前用户。若填global，则填入到当前聊天室全局，每次都可以收到该笔记信息
             operations(array): 操作列表，每个元素是一个对象(object)，包含 action、index、content 三个字段。
@@ -327,43 +330,63 @@ class Main(Star):
 
         raw_notes = self.note.get_user_note(user_id, group_id)
 
-        # 将原始列表复制出来以便操作
+        # 复制原列表（仅作为修改和删除的载体，使用 None 占位）
         temp_notes = raw_notes.copy()
-
-        # 根据提示，把需要删除或修改的位置在当前副本上处理，用 None 占位防止索引发生位移
         错误信息 = []
+
+        # 使用字典记录每个原索引处需要【前置插入】的列表（解决同索引覆盖问题）
         欲插入 = {}
+        追加内容 = []
+
         for op in operations:
             action = op.get("action")
             try:
                 index = int(op.get("index", -1))
             except (ValueError, TypeError) as e:
-                错误信息.append(
-                    f"在执行 {action} 操作时发生索引错误，欲操作索引：{op.get('index')}，欲操作内容：{op.get('content')}"
-                )
+                错误信息.append(f"执行 {action} 时索引转换错误：{op.get('index')}。")
                 logger.error(f"大模型调用工具出错，索引无法转换{action}-{op.get('index')}，{e}", exc_info=True)
                 continue
+
             content = op.get("content", "")
 
-            try:
-                if action == "delete":
+            # 支持负数索引：将其转换为基于原列表长度的正数索引
+            if index < 0:
+                index = len(raw_notes) + index
+            index = max(0, index)
+            if action == "delete":
+                if 0 <= index < len(temp_notes):
                     temp_notes[index] = None
-                elif action == "replace":
+                else:
+                    错误信息.append(f"删除失败：索引 {op.get('index')} 越界或不存在。")
+            elif action == "replace":
+                if 0 <= index < len(temp_notes):
                     temp_notes[index] = content
-                elif action == "add":
-                    欲插入[index] = content
-            except IndexError as e:
-                错误信息.append(
-                    f"在执行 {action} 操作时发生索引错误，欲操作索引：{op.get('index')}，欲操作内容：{op.get('content')}"
-                )
-                logger.error(f"大模型调用工具出错：{action}-{content}，{e}", exc_info=True)
+                else:
+                    错误信息.append(f"替换失败：索引 {op.get('index')} 越界或不存在。")
+            elif action == "add":
+                # 若插入索引超出原始列表长度，则统一按顺序追加到末尾
+                if index >= len(raw_notes):
+                    追加内容.append(content)
+                else:
+                    # 记录在该索引原始位置【之前】需要插入的内容
+                    欲插入.setdefault(max(0, index), []).append(content)
 
-        # 1. 应用所有暂存的 "add" 操作（从大到小插入，防止偏移）
-        for idx, content in sorted(欲插入.items(), key=lambda x: x[0], reverse=True):
-            temp_notes.insert(idx, content)  # 此时 None 占位还在，保证了原始索引位置不变
+        # ==========================================
+        # 核心逻辑：按原始视图重组列表（彻底杜绝索引偏移）
+        # ==========================================
+        new_notes = []
+        for i, note in enumerate(temp_notes):
+            # 1. 如果当前索引有预定的插入内容，先按原本的添加顺序推入
+            if i in 欲插入:
+                new_notes.extend(欲插入[i])
+            # 2. 如果原内容没有被删除（不是 None），将其保留/更新
+            if note is not None:
+                new_notes.append(note)
 
-        # 2. 最后统一清理被 "delete" 标记为 None 的元素
-        new_notes = [note for note in temp_notes if note is not None]
+        # 3. 最后加上所有越界的追加内容
+        new_notes.extend(追加内容)
+
+        new_notes = [note for note in new_notes if note is not None]
 
         # 限制长度不超过20
         if len(new_notes) > 20:
@@ -416,7 +439,7 @@ class Main(Star):
 
         lines = ["搜索到以下笔记："]
         for user_key, notes in result.items():
-            lines.append(f"\n📌 {user_key}：")
+            lines.append(f"📌 {user_key}：")
             lines.extend(f"  - {note}" for note in notes)
         return "\n".join(lines)
 
@@ -449,7 +472,7 @@ class Main(Star):
             lines.append(f"用户 {user_name}（{user_id}）的笔记内容：\n")
         else:
             lines.append(f"用户 ID：{user_id} 的笔记内容：\n")
-        return '\n'.join(lines + [f"{i}.{j}\n" for i, j in enumerate(notes)])
+        return '\n'.join(lines + [f"{i}.{j}\n" for i, j in enumerate(notes)] if notes else ['（无笔记内容）'])
 
     @filter.llm_tool(name="get_user_id")
     async def llm_tool_get_user_id(self, event: AstrMessageEvent, user_name: str) -> str:
