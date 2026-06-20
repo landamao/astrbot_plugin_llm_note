@@ -6,6 +6,36 @@
 
 ---
 
+## [v1.7.0] - 2026-06-20
+
+### 重构
+- **参数顺序统一**：`get_user_note` / `set_user_note` / `重载group_note` / `重载private_note` 参数顺序改为 `(group_id, user_id, ...)`，与数据存储结构一致
+- **prompt 注入位置**：从 `req.prompt` 改为 `req.system_prompt`，避免上下文大量重复内容
+- **prompt 格式重写**：新增【动态记忆与私密笔记协议】，区分用户区（个人画像）和全局区（群组记忆），含运行示例
+- 笔记索引格式从 `0.内容` 改为 `[0] 内容`
+- `_resolve_path` 新增核心数据文件拦截，禁止通过 file_name 参数操作 data.json
+- `_read_data` / `_write_data` 核心数据文件出错时直接 raise 崩溃，非核心文件降级处理
+- `__init__` 参数 `config` 改为 `_`（未使用），移除 `initialize` / `terminate` 的冗余日志和 pass
+
+### 新增
+- 全局区笔记上限 40 条（用户区仍为 20 条）
+- `edit_note` 新增未知 action 类型拦截
+- `edit_note` 写入失败时返回错误提示
+- `search_note` 搜索结果限制 20 条，超出时提示总条数
+- `search_note` 关键词大小写不敏感（`.lower()` 匹配）
+- `恢复笔记` 新增 `.json` 后缀校验和空文件名校验
+- `恢复笔记` ID 提取改用 `split("删除前数据_")` 方式
+- `重载group_note` / `重载private_note` 新增返回值类型校验（dict / list）
+- `get_user_id` 用户名匹配大小写不敏感，`call_action` 传 `int(group_id)`
+
+### 优化
+- `edit_note` docstring 重写：强调操作应由 LLM 主动发出、拒绝恶意使唤、禁止自行计算索引偏移
+- `search_note` / `get_note` docstring 新增隐私保护提醒
+- `get_note` 空笔记逻辑改为 if/else 结构，更清晰
+- 丢弃笔记通知显示条数和编号
+
+---
+
 ## [v1.6.4] - 2026-06-20
 
 ### 修复
