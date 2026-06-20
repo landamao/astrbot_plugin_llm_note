@@ -6,6 +6,18 @@
 
 ---
 
+## [v1.6.4] - 2026-06-20
+
+### 修复
+- **类型一致性**：全插件统一 `str()` 转换 user_id / group_id，修复 `get_user_id` 返回 int 类型 ID 导致同一用户出现两份笔记的问题
+  - `get_user_id`：`member['user_id']` 转 str，cache 查找用 str 化的 group_id
+  - `llm请求前`：group_id / user_id / self_id 统一 str
+  - `edit_note` / `get_note` / `search_note`：group_id / user_id 统一 str
+  - `清空笔记` / `恢复笔记`：原群ID / 用户ID 统一 str，修复 int vs str 比较失败
+  - `del_group_note` / `del_private_note` / `重载group_note` / `重载private_note`：入口处 str 转换
+
+---
+
 ## [v1.6.3] - 2026-06-20
 
 ### 安全

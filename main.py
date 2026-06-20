@@ -105,6 +105,7 @@ class Note:
 
     def del_group_note(self, group_id: str) -> bool:
         """删除指定群的笔记"""
+        group_id = str(group_id)
         data = self._read_data()
         if group_id not in data:
             return True
@@ -113,6 +114,7 @@ class Note:
 
     def del_private_note(self, user_id: str) -> bool:
         """删除私聊指定用户的笔记"""
+        user_id = str(user_id)
         data = self._read_data()
         if "private" not in data:
             return True
@@ -123,9 +125,10 @@ class Note:
 
     def 重载group_note(self, file_name, group_id:str) -> bool:
         """从数据目录的某个文件重载某个群组的数据"""
+        group_id = str(group_id)
         group_data = self._read_data(file_name)
         if not group_data:
-            logger.error(f"欲重载私聊数据文件：{file_name} 无效，无可用数据")
+            logger.error(f"欲重载群数据文件：{file_name} 无效，无可用数据")
             return False
         data = self._read_data()
         data[group_id] = group_data
@@ -133,6 +136,7 @@ class Note:
 
     def 重载private_note(self, file_name, user_id:str) -> bool:
         """从数据目录的某个文件重载某个私聊用户的数据"""
+        user_id = str(user_id)
         user_data = self._read_data(file_name)
         data = self._read_data()
         key = "private"
@@ -181,9 +185,9 @@ class Main(Star):
 
     @filter.on_llm_request()
     async def llm请求前(self, event: AstrMessageEvent, req: ProviderRequest):
-        group_id = event.get_group_id() or "private"
-        user_id = event.get_sender_id()
-        self_id = event.get_self_id()
+        group_id = str(event.get_group_id()) if event.get_group_id() else "private"
+        user_id = str(event.get_sender_id())
+        self_id = str(event.get_self_id())
         user_name = event.get_sender_name()
         if group_id not in self.user_info_cache:
             self.user_info_cache[group_id] = {}
@@ -219,8 +223,8 @@ class Main(Star):
         """清空笔记，规则：
         非管理员只能在私聊情况下清空llm为自己记录的笔记，
         管理员可清空群笔记，且一次性将清空该群所有笔记"""
-        原群ID = event.get_group_id()
-        用户ID = event.get_sender_id()
+        原群ID = str(event.get_group_id()) if event.get_group_id() else None
+        用户ID = str(event.get_sender_id())
         if not event.is_admin():
             if 原群ID:
                 yield event.plain_result("❌️ 只有管理员可以操作群数据")
@@ -260,8 +264,8 @@ class Main(Star):
         if '/' in file_name or '\\' in file_name:
             yield event.plain_result("❌️ 文件名不合法")
             return
-        原群ID = event.get_group_id()
-        用户ID = event.get_sender_id()
+        原群ID = str(event.get_group_id()) if event.get_group_id() else None
+        用户ID = str(event.get_sender_id())
         if not file_name.startswith(("data_私", "data_群")):
             yield event.plain_result("文件名不符合规范，请确保文件名前缀可识别，如`data_群`，`data_私`")
             return
@@ -332,8 +336,8 @@ class Main(Star):
         if not operations:
             return "未执行任何操作，笔记列表未变动。"
 
-        group_id = event.get_group_id() or "private"
-        user_id = user_id or event.get_sender_id()
+        group_id = str(event.get_group_id()) if event.get_group_id() else "private"
+        user_id = str(user_id) if user_id else str(event.get_sender_id())
 
         if user_id == "global" and group_id == "private":
             return "当前为私聊，无全局笔记，请保持user_id为空"
@@ -429,20 +433,20 @@ class Main(Star):
             匹配到的笔记列表，附带用户昵称（如果有缓存）和用户 ID。"""
         if not keyword:
             return "❌️ 你传入的关键词为空"
-        group_id = event.get_group_id()
+        group_id = str(event.get_group_id()) if event.get_group_id() else None
         if not group_id:
             return "当前为私聊，无其他笔记信息，无法搜索"
 
         data = self.note.get_group_note(group_id)
         result = {}  # type: dict[str, list[str]]
         group_info = self.user_info_cache.get(group_id, {})
-        for user_id, notes in data.items():
+        for uid, notes in data.items():
             for note in notes:
                 if keyword in note:
-                    if user_id in group_info:
-                        key = f"{group_info[user_id]}_{user_id}"
+                    if uid in group_info:
+                        key = f"{group_info[uid]}_{uid}"
                     else:
-                        key = user_id
+                        key = uid
 
                     if key not in result:
                         result[key] = []
@@ -473,7 +477,8 @@ class Main(Star):
 
         if not user_id:
             return "参数无效"
-        group_id = event.get_group_id()
+        user_id = str(user_id)
+        group_id = str(event.get_group_id()) if event.get_group_id() else None
         if not group_id:
             return "当前为私聊，只有当前用户，无法获取其他用户"
         group_data = self.user_info_cache.get(group_id, {})
@@ -499,7 +504,8 @@ class Main(Star):
         """
         group_id = event.get_group_id()
         if not group_id:
-            return "当前为私聊，无需搜索，该用户ID固定为：" + event.get_sender_id()
+            return "当前为私聊，无需搜索，该用户ID固定为：" + str(event.get_sender_id())
+        group_id_str = str(group_id)
 
         # 针对 AiocqhttpMessageEvent 实时调用 OneBot API
         if type(event).__name__ == "AiocqhttpMessageEvent":
@@ -515,7 +521,7 @@ class Main(Star):
                     if not name:
                         continue
                     if user_name in name or name in user_name:
-                        result[member['user_id']] = name
+                        result[str(member['user_id'])] = name
 
                 if result:
                     return '\n'.join(f"用户{name}的ID为：{_id}" for _id, name in result.items())
@@ -525,7 +531,7 @@ class Main(Star):
                 pass
 
         # 原有缓存逻辑（私聊已提前返回，此处仅在群聊且非 API 或 API 失败时执行）
-        group_data = self.user_info_cache.get(group_id, {})
+        group_data = self.user_info_cache.get(group_id_str, {})
         result = {}
         for _id, name in group_data.items():
             if user_name in name or name in user_name:
