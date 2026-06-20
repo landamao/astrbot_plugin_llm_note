@@ -180,7 +180,7 @@ class Note:
             return False
 
 class Main(Star):
-    def __init__(self, context: Context, _: AstrBotConfig):
+    def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.data_dir = StarTools.get_data_dir()  # type: Path
         self.note = Note(self.data_dir)
