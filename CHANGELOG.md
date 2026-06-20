@@ -3,6 +3,13 @@
 本文件记录笔记本插件 (LLM Note) 的所有版本变更。
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
+---
+
+## [v1.7.2] - 2026-06-20
+
+### 优化
+- llm请求时系统提示词增加用户信息
+
 
 ---
 

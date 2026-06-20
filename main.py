@@ -228,7 +228,7 @@ class Main(Star):
         ]
         if notes:
             note_str = ''.join([f"[{i}] {j}\n" for i, j in enumerate(notes)])
-            prompt_segments.append(f"\n这是你为当前用户记录的笔记本内容（格式：[索引] 内容\\n\\n）：\n{note_str}")
+            prompt_segments.append(f"\n这是你为当前用户 {user_name}（{user_id}) 记录的笔记本内容（格式：[索引] 内容\\n\\n）：\n{note_str}")
 
         if global_notes:
             global_note_str = ''.join([f"[{i}] {j}\n" for i, j in enumerate(global_notes)])
