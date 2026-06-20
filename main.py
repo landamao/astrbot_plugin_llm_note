@@ -45,7 +45,7 @@ class Note:
             logger.error(f"读取数据失败\n路径：{path}\n错误：{e}", exc_info=True)
             return {}
 
-    def _write_data(self, data: dict, file_name=None) -> bool:
+    def _write_data(self, data: dict|list, file_name=None) -> bool:
         """写入底层 JSON 数据（原子写入，防止中途崩溃导致数据损坏），返回是否写入成功"""
         if file_name is None:
             path = self.data_path
@@ -134,24 +134,18 @@ class Note:
     def 重载private_note(self, file_name, user_id:str) -> bool:
         """从数据目录的某个文件重载某个私聊用户的数据"""
         user_data = self._read_data(file_name)
-        try:
-            list_data = user_data[user_id]
-        except KeyError:
-            logger.error(f"欲重载私聊数据文件：{file_name} 无效，无法识别，请确保格式为：" + "{" + user_id + "：（数据）}")
-            return False
-
         data = self._read_data()
         key = "private"
         if key not in data:
             data[key] = {}
-        data[key][user_id] = list_data
+        data[key][user_id] = user_data
         return self._write_data(data)
 
-    def write_json_to_file(self, data:dict, file_name:str) -> bool:
+    def write_json_to_file(self, data:dict|list, file_name:str) -> bool:
         """在数据目录写入json到指定文件"""
         return self._write_data(data, file_name)
 
-    def read_json_file(self, file_name:str) -> dict:
+    def read_json_file(self, file_name:str) -> dict|list:
         return self._read_data(file_name)
 
     def delete_file(self, file_name:str) -> bool:
@@ -209,11 +203,11 @@ class Main(Star):
 
         if notes:
             note_str = ''.join([f"{i}.{j}\n" for i, j in enumerate(notes)])
-            prompt_segments.append(f"\n这是当前用户的笔记本内容（格式：索引.内容\\n\\n）：\n{note_str}")
+            prompt_segments.append(f"\n这是你为当前用户记录的笔记本内容（格式：索引.内容\\n\\n）：\n{note_str}")
 
         if global_notes:
             global_note_str = ''.join([f"{i}.{j}\n" for i, j in enumerate(global_notes)])
-            prompt_segments.append(f"\n这是当前聊天室全局笔记内容：\n{global_note_str}")
+            prompt_segments.append(f"\n这是你为当前聊天室记录的笔记内容：\n{global_note_str}")
 
         prompt_segments.append("\n</notes_plugin>\n\n")
 
@@ -254,15 +248,18 @@ class Main(Star):
         else:
             删除前数据 = self.note.get_private_note(操作ID)
             删除前文件 = f"data_私{操作ID}删除前数据_{时间}.json"
-            self.note.write_json_to_file({操作ID:删除前数据}, 删除前文件)
+            self.note.write_json_to_file(删除前数据, 删除前文件)
             self.note.del_private_note(操作ID)
-        yield event.plain_result(f"清空成功，若要恢复，请使用`/恢复笔记 {删除前文件}`")
+        yield event.plain_result(f"清空成功，若要恢复，请使用\n/恢复笔记 {删除前文件}")
 
     @filter.command(command_name="恢复笔记")
     async def command_恢复note(self, event: AstrMessageEvent, file_name: str = None):
         """恢复笔记，规则：
         非管理员只能在私聊情况下恢复为自己的笔记，
         管理员可恢复群笔记"""
+        if '/' in file_name or '\\' in file_name:
+            yield event.plain_result("❌️ 文件名不合法")
+            return
         原群ID = event.get_group_id()
         用户ID = event.get_sender_id()
         if not file_name.startswith(("data_私", "data_群")):
@@ -275,8 +272,11 @@ class Main(Star):
         else:
             return #理论上不存在，因为前面已经`startswith(("data_私", "data_群"))`了
         import re
-        识别ID = re.match(r'\d+', file_name[len("data_私"):]).group()
-        识别ID = str(识别ID)
+        match = re.match(r'\d+', file_name[len("data_私"):])
+        if not match:
+            yield event.plain_result("❌️ 未提取到识别ID，请确保文件名正确")
+            return
+        识别ID = match.group()
         if 文件是群数据:
             if not event.is_admin():
                 yield event.plain_result("❌️ 只有管理员可以操作群数据")
@@ -400,7 +400,10 @@ class Main(Star):
 
         # 限制长度不超过20
         if len(new_notes) > 20:
+            丢弃note = new_notes[:-20]
             new_notes = new_notes[-20:]
+        else:
+            丢弃note = []
 
         # 持久化保存
         self.note.set_user_note(user_id, group_id, new_notes)
@@ -411,6 +414,8 @@ class Main(Star):
         # 格式化输出返回给大模型
         note_str = '\n'.join([f"{i}.{j}\n" for i, j in enumerate(new_notes)])
         result = f"这是操作后的{'全局' if user_id == 'global' else '个人'}笔记本内容：\n{note_str}"
+        if 丢弃note:
+            result += "\n\n笔记数量超出，以下笔记内容已被丢弃：" + '\n'.join(丢弃note)
         if 错误信息:
             result += "\n\n发生错误的有：" + '\n'.join(错误信息)
         return result

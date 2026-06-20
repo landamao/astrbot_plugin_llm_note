@@ -6,6 +6,23 @@
 
 ---
 
+## [v1.6.3] - 2026-06-20
+
+### 安全
+- 提取 `_resolve_path` 统一路径校验方法，`_read_data`/`_write_data`/`delete_file` 全部走统一目录穿越拦截
+- `恢复笔记` 指令新增路径分隔符拦截（`/` 和 `\`）
+
+### 优化
+- `_write_data` / `write_json_to_file` / `read_json_file` 类型标注扩展为 `dict|list`，支持备份文件直接写 list
+- `重载private_note` 简化逻辑，移除多余的 try/except，直接写入文件内容
+- `清空笔记` 私聊备份格式改为直接写 list（与重载逻辑匹配）
+- prompt 注入措辞优化："当前用户的" → "你为当前用户记录的"，"全局笔记" → "你为当前聊天室记录的"
+- `恢复笔记` `re.match` 加空值保护，match 失败时返回提示而非 crash
+- `edit_note` 超出 20 条限制时，返回被丢弃的笔记内容通知 LLM
+- `edit_note` docstring 示例更新，展示同索引多次插入场景
+
+---
+
 ## [v1.6.1] - 2026-06-20
 
 ### 新增
