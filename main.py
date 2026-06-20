@@ -21,18 +21,23 @@ class Note:
             with open(self.data_path, 'w', encoding='utf-8') as f:
                 json.dump({}, f, ensure_ascii=False)
 
+    def _resolve_path(self, file_name: str) -> Path | None:
+        """将文件名解析为数据目录内的安全路径，拦截目录穿越"""
+        base_dir = self.data_dir.resolve()
+        target_path = (base_dir / file_name).resolve()
+        if not target_path.is_relative_to(base_dir):
+            logger.error(f"目录穿越拦截：{file_name} -> {target_path}")
+            return None
+        return target_path
+
     def _read_data(self, file_name=None) -> dict:
         """读取底层 JSON 数据，file_name可选，文件内容必须是json格式的"""
         if file_name is None:
             path = self.data_path
         else:
-            base_dir = self.data_dir.resolve()  # 基准目录的绝对路径
-            target_path = (base_dir / file_name).resolve()  # 拼接并解析成绝对路径
-            if not target_path.is_relative_to(base_dir):
-                logger.error(f"目录穿越拦截：{file_name} -> {target_path}")
-                return {}  # 保持原错误处理风格，返回空字典
-
-            path = target_path
+            path = self._resolve_path(file_name)
+            if path is None:
+                return {}
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 return json.load(f)
@@ -45,7 +50,9 @@ class Note:
         if file_name is None:
             path = self.data_path
         else:
-            path = self.data_dir / file_name
+            path = self._resolve_path(file_name)
+            if path is None:
+                return False
         try:
             tmp_path = path.with_suffix(".tmp")
             with open(tmp_path, 'w', encoding='utf-8') as f:
@@ -149,9 +156,11 @@ class Note:
 
     def delete_file(self, file_name:str) -> bool:
         """删除数据目录下指定文件"""
-        path = self.data_dir / file_name
-        # 确保两边都是绝对路径且去掉符号链接干扰
-        if path.resolve() == self.data_path.resolve():
+        path = self._resolve_path(file_name)
+        if path is None:
+            return False
+        # 禁止删除核心数据文件
+        if path == self.data_path.resolve():
             logger.warning(f"禁止删除核心数据文件: {self.data_path}")
             return False
         try:
@@ -298,7 +307,7 @@ class Main(Star):
     ) -> str:
         """
         为用户记录笔记
-        批量修改笔记列表（支持按索引增、删、改），笔记总数不超过20条，若超出，则会自动删掉最前面的，请合理规划笔记内容
+        批量修改笔记列表（支持按索引增、删、改），每个用户笔记总数不超过20条，若超出，则会自动删掉最前面的，请合理规划笔记内容
         **隐私保护**，笔记内容对所有用户都不可见，仅对你可见，你可以选择性透露给用户，可记录好感度，关系，印象，用户偏好，信息等
         批量操作无索引位移：在一次调用中同时进行删除、插入等操作时，所有操作基于原始索引执行，无需担心索引位移问题。内部实现先标记删除/替换（None 占位），再按原始索引顺序重组列表，最后统一清理占位符。
         Args:
@@ -311,10 +320,11 @@ class Main(Star):
 
                 示例（JSON格式）：
                 [
-                    {"action": "add", "index": 0, "content": "插入到第一条"},
-                    {"action": "replace", "index": -2, "content": "覆盖**倒数**第二条的内容"},
-                    {"action": "delete", "index": 0},
-                    {"action": "delete", "index": 1}
+                    {"action": "add", "index": 2, "content": "插入到第二三条之间"},
+                    {"action": "add", "index": 2, "content": "再插入到一个到第二三条之间"},
+                    {"action": "replace", "index": 3, "content": "替换第三条的内容（**按原索引**）"},
+                    {"action": "delete", "index": 4},
+                    {"action": "delete", "index": -1}
                 ]
         Returns:
             操作后的列表内容
