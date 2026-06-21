@@ -264,16 +264,22 @@ class Main(Star):
             else:
                 操作ID = 用户ID
         操作ID = str(操作ID)
-        时间 = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
         if 操作群:
             删除前数据 = self.note.get_group_note(操作ID)
-            删除前文件 = f"data_群{操作ID}删除前数据_{时间}.json"
-            self.note.write_json_to_file(删除前数据, 删除前文件)
-            self.note.del_group_note(操作ID)
+            if not 删除前数据 or not any(删除前数据.values()):
+                yield event.plain_result("⚠️ 当前群的笔记已经是空的了，无需清空")
+                return
         else:
             删除前数据 = self.note.get_private_note(操作ID)
-            删除前文件 = f"data_私{操作ID}删除前数据_{时间}.json"
-            self.note.write_json_to_file(删除前数据, 删除前文件)
+            if not 删除前数据:
+                yield event.plain_result("⚠️ 当前笔记已经是空的了，无需清空")
+                return
+        时间 = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
+        删除前文件 = f"data_{'群' if 操作群 else '私'}{操作ID}删除前数据_{时间}.json"
+        self.note.write_json_to_file(删除前数据, 删除前文件)
+        if 操作群:
+            self.note.del_group_note(操作ID)
+        else:
             self.note.del_private_note(操作ID)
         yield event.plain_result(f"清空成功，若要恢复，请使用\n/恢复笔记 {删除前文件}")
 
