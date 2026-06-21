@@ -5,6 +5,35 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
 ---
 
+## [v1.8.0] - 2026-06-22
+
+### 新增
+- **自动清理备份**：新增 `自动删除时长` 配置项（0-48小时，默认24），到期自动删除备份文件，0代表永不删除
+- **错误日志系统**：新增 `error.log` 错误日志文件，`_resolve_path`/`_read_data`/`_write_data`/`delete_file` 等方法出错时同时写入 error.log
+- **`/清空笔记日志` 指令**：管理员可清空 error.log 内容
+- **Cache 类**：独立用户信息缓存类，支持 LRU 淘汰机制（上限 20000 条，每次超限清理 50 条）
+- **操作冷却**：非管理员清空/恢复笔记增加 10 分钟冷却时间，防止频繁操作
+- `delete_file` 新增 error.log 文件保护，禁止通过该接口删除日志文件
+
+### 重构
+- **备份格式结构化**：备份文件从直接写裸数据改为 `{id, type, data}` 结构化 JSON，恢复时通过 type 字段判断类型，不再依赖文件名前缀解析
+- **`重载group_note` / `重载private_note`**：参数从 `file_name` 改为直接传 `data`（dict/list），文件读取和类型校验移到调用方
+- **`恢复笔记` 指令**：移除文件名前缀校验和 ID 提取逻辑，改从备份文件内容读取 `id` 和 `type`，管理员可跨群恢复
+- prompt 标签从裸文本改为 `<note>` / `</note>` 闭合标签
+- `清空笔记` 方法名从 `command_del_note` 改为 `command_clear_note`
+
+### 优化
+- `清空笔记` 新增文件名非法字符过滤（`<>:"/\|?*` 替换为 ❓）
+- `清空笔记` 新增空笔记校验，避免生成无意义空备份
+- `清空笔记` 成功提示根据 `自动删除时长` 显示不同恢复提示
+- `search_note` 全局笔记显示为【全局笔记】而非裸 "global"
+- `get_user_id` 用户名匹配改为大小写不敏感（`lname` 变量）
+- `get_user_id` API 调用失败时记录 warning 日志而非静默 pass
+- `delete_file` 返回值修复（原删除失败时未 return False）
+- `read_json_file` 返回类型标注增加 `None`
+
+---
+
 ## [v1.7.4] - 2026-06-22
 
 ### 修复

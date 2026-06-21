@@ -1,8 +1,13 @@
 {
-  "无": {
-    "description": "暂无配置",
-    "type": "string",
-    "default": "",
-    "hint": ""
+  "自动删除时长": {
+    "description": "自动删除时长",
+    "type": "int",
+    "slider": {
+        "min": 0,
+        "max": 48,
+        "step": 1
+    },
+    "default": 24,
+    "hint": "清空笔记时，备份文件多少小时后自动删除，0代表永不"
   }
 }

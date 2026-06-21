@@ -1,6 +1,8 @@
+import asyncio
 import json
 import time
 from pathlib import Path
+from collections import OrderedDict
 from astrbot.api.event import filter
 from astrbot.api.star import StarTools
 from astrbot.api.provider import ProviderRequest
@@ -11,6 +13,7 @@ class Note:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
         self.data_path = self.data_dir / "data.json"
+        self.error_path = self.data_dir / "error.log"
         self._ensure_file()
         #单线程异步不用锁了，全文没有一个await让出
 
@@ -26,10 +29,14 @@ class Note:
         base_dir = self.data_dir.resolve()
         target_path = (base_dir / file_name).resolve()
         if not target_path.is_relative_to(base_dir):
-            logger.error(f"目录穿越拦截：{file_name} -> {target_path}")
+            log = f"目录穿越拦截：{file_name} -> {target_path}"
+            logger.error(log)
+            self.add_log(log)
             return None
         if target_path == self.data_path.resolve():
-            logger.error(f"不应该以该方式操作核心数据文件: {self.data_path}，应使用已提供的接口操作")
+            log = f"禁止直接操作核心数据文件: {self.data_path}，请使用专用接口"
+            logger.error(log)
+            self.add_log(log)
             return None
         return target_path
 
@@ -48,6 +55,7 @@ class Note:
             if path == self.data_path.resolve():
                 raise  #核心数据文件出错直接崩溃处理
             logger.error(f"读取数据失败\n路径：{path}\n错误：{e}", exc_info=True)
+            self.add_log(f"读取数据失败\n路径：{path}\n错误：{e}")
             return None
 
     def _write_data(self, data: dict|list, file_name=None) -> bool | None:
@@ -68,6 +76,7 @@ class Note:
             if path == self.data_path.resolve():
                 raise  #核心数据文件出错直接崩溃处理
             logger.error(f"写入文件失败\n路径：{path}\n数据：{data}\n错误：{e}", exc_info=True)
+            self.add_log(f"写入文件失败\n路径：{path}\n数据：{data}\n错误：{e}")
             return False
 
     def get_user_note(self, group_id: str, user_id: str) -> list[str]:
@@ -129,47 +138,38 @@ class Note:
         del data["private"][user_id]
         return self._write_data(data)
 
-    def 重载group_note(self, group_id:str, file_name:str) -> bool:
-        """从数据目录的某个文件重载某个群组的数据"""
+    def 重载group_note(self, group_id:str, data:dict) -> bool:
+        """从数据重载某个群组的数据"""
         group_id = str(group_id)
-        group_data = self._read_data(file_name)
-        if not group_data:
-            logger.error(f"欲重载群数据文件：{file_name} 无效，无可用数据")
-            return False
-        if not isinstance(group_data, dict):
-            logger.error(f"欲重载群数据文件：{file_name} 无效，类型错误，期望类型：dict，实际类型：{type(group_data).__name__}")
-            return False
-        data = self._read_data()
-        data[group_id] = group_data
-        return self._write_data(data)
+        now_data = self._read_data()
+        now_data[group_id] = data
+        return self._write_data(now_data)
 
-    def 重载private_note(self, user_id:str, file_name:str) -> bool:
+    def 重载private_note(self, user_id:str, data:list) -> bool:
         """从数据目录的某个文件重载某个私聊用户的数据"""
         user_id = str(user_id)
-        user_data = self._read_data(file_name)
-        if not user_data:
-            logger.error(f"欲重载私聊数据文件：{file_name} 无效，无可用数据")
-            return False
-        if not isinstance(user_data, list):
-            logger.error(f"欲重载私聊数据文件：{file_name} 无效，类型错误，期望类型：list，实际类型：{type(user_data).__name__}")
-            return False
-        data = self._read_data()
+        now_data = self._read_data()
         key = "private"
-        if key not in data:
-            data[key] = {}
-        data[key][user_id] = user_data
-        return self._write_data(data)
+        if key not in now_data:
+            now_data[key] = {}
+        now_data[key][user_id] = data
+        return self._write_data(now_data)
 
     def write_json_to_file(self, data:dict|list, file_name:str) -> bool:
         """在数据目录写入json到指定文件"""
         return self._write_data(data, file_name)
 
-    def read_json_file(self, file_name:str) -> dict | list:
+    def read_json_file(self, file_name:str) -> dict | list | None:
         return self._read_data(file_name)
 
     def delete_file(self, file_name:str) -> bool:
         """删除数据目录下指定文件"""
         path = self._resolve_path(file_name)
+        if path == self.error_path.resolve():
+            log = f"❓可能是非管理员操作，不应该直接删除日志文件，应该使用清空方法"
+            logger.warning(log)
+            self.add_log(log)
+            return False
         if path is None:
             return False
         try:
@@ -177,33 +177,140 @@ class Note:
             return True
         except Exception as e:
             logger.error(f"删除文件失败，路径：{path}\n错误：{e}", exc_info=True)
+            self.add_log(f"删除文件失败，路径：{path}\n错误：{e}")
             return False
+
+    def add_log(self, text:str) -> None:
+        try:
+            timestamp = time.strftime("%Y-%m-%d-%H-%M-%S")
+            with open(self.error_path, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {text}\n\n")  # 加上换行符，便于区分日志条目
+        except Exception as e:
+            logger.warning(f"错误日志写入文件失败：{e}", exc_info=True)
+
+    def clear_error(self) -> bool:
+        try:
+            with open(self.error_path, "w", encoding="utf-8"):
+                pass
+            return True
+        except Exception as e:
+            logger.error(f"清空日志文件失败：{e}", exc_info=True)
+            return False
+
+class Cache:
+    def __init__(self):
+        # 核心数据字典：{group_id: {user_id: user_name}}
+        self.user_info_cache = {}
+
+        # 记录 (group_id, user_id) 的活跃顺序，用于淘汰机制
+        self.key_order = OrderedDict()
+
+        self.max_cache_count = 20000
+        self.delete_batch_size = 50  # 每次超限时清理的数量
+
+        self.cache_lock = asyncio.Lock()
+
+    async def 记录用户信息(self, event):
+        async with self.cache_lock:
+            group_id = str(event.get_group_id() or "private")
+            user_id = str(event.get_sender_id())
+            user_name = event.get_sender_name()
+
+            # 1. 确保群组字典存在
+            if group_id not in self.user_info_cache:
+                self.user_info_cache[group_id] = {}
+
+            # 2. 写入或更新用户信息
+            self.user_info_cache[group_id][user_id] = user_name
+
+            # 3. 维护有序队列 (LRU 逻辑)
+            cache_key = (group_id, user_id)
+            if cache_key in self.key_order:
+                # 如果用户已存在，将其移动到队列末尾（刷新活跃度）
+                self.key_order.move_to_end(cache_key)
+            else:
+                # 新用户，直接加到末尾
+                self.key_order[cache_key] = None
+
+            # 4. 检查是否超出最大容量
+            if len(self.key_order) > self.max_cache_count:
+                # 循环淘汰最旧的记录
+                for _ in range(self.delete_batch_size):
+                    # popitem(last=False) 会弹出队列最前面（最不活跃/最早）的元素
+                    oldest_key, _ = self.key_order.popitem(last=False)
+                    old_group, old_user = oldest_key
+
+                    # 从核心字典中安全删除
+                    if old_group in self.user_info_cache:
+                        self.user_info_cache[old_group].pop(old_user, None)
+
+                        # (可选) 如果某个群的人都被清空了，可以把这个群的空字典也删掉，节省内存
+                        if not self.user_info_cache[old_group]:
+                            del self.user_info_cache[old_group]
 
 class Main(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.自动删除时长 = config['自动删除时长'] # type: int # n小时，0代表永不
         self.data_dir = StarTools.get_data_dir()  # type: Path
         self.note = Note(self.data_dir)
-        self.user_info_cache = {} #type: dict[str, dict[str,str]]
+        self.cache = Cache()
+        self.清空冷却时间 = {} # type: dict[str, float]
+        self.恢复冷却时间 = {}  # type: dict[str, float]
+        self._clean_task = None  # 新增
 
     async def initialize(self) -> None:
         """可选异步初始化，当插件被激活时会调用这个方法"""
+        if self.自动删除时长 > 0:
+            self._clean_task = asyncio.create_task(self._auto_clean_backups())
 
     async def terminate(self) -> None:
         """可选异步终止，当插件被关闭时调用这个方法"""
+        # 终止时取消任务
+        if self._clean_task:
+            self._clean_task.cancel()
+            try:
+                await self._clean_task
+            except asyncio.CancelledError:
+                pass
 
+    # ---------- 每小时自动清理过期备份 ----------
+    async def _auto_clean_backups(self):
+        while True:
+            await asyncio.sleep(3600)  # 每小时执行一次
+            if self.自动删除时长 <= 0:
+                continue
+            try:
+                self._clean_expired_backups()
+            except Exception as e:
+                logger.error(f"自动清理备份文件出错: {e}", exc_info=True)
+                self.note.add_log(f"自动清理备份文件出错: {e}")
+
+    def _clean_expired_backups(self):
+        cutoff = time.time() - self.自动删除时长 * 3600
+        for f in self.data_dir.glob("*.json"):
+            # 跳过核心数据文件
+            if f.name == "data.json":
+                continue
+            # 仅清理符合备份命名规则的文件（文件名包含“删除前数据”）
+            if "删除前数据" in f.name:
+                try:
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink()
+                        logger.info(f"已删除过期备份文件: {f.name}")
+                except Exception as e:
+                    logger.error(f"删除备份文件 {f.name} 失败: {e}")
+
+    # ---------- 原有逻辑 ----------
     @filter.on_llm_request()
     async def llm请求前(self, event: AstrMessageEvent, req: ProviderRequest):
-        group_id = str(event.get_group_id() or "private")
+        """llm请求前添加笔记信息"""
         user_id = str(event.get_sender_id())
         self_id = str(event.get_self_id())
-        user_name = event.get_sender_name()
-        if group_id not in self.user_info_cache:
-            self.user_info_cache[group_id] = {}
-        self.user_info_cache[group_id][user_id] = user_name
-
         if user_id == self_id:
             return
+        group_id = str(event.get_group_id() or "private")
+        user_name = event.get_sender_name()
 
         notes = self.note.get_user_note(group_id, user_id)
         global_notes = self.note.get_global_notes(group_id)
@@ -213,8 +320,8 @@ class Main(Star):
             return
 
         prompt_segments = [
-"""
-\n【动态记忆与私密笔记协议】
+"""<note>
+【动态记忆与私密笔记协议】
 本文本是你的私密笔记，仅对你可见。你可以根据聊天语境，选择性地将笔记内容转化为对话线索透露给用户：
 
 用户区（个人画像）：仅记录当前用户的独特偏好、习惯或对用户的好感、印象，关系等。
@@ -224,7 +331,7 @@ class Main(Star):
 隐私保护规范：甄别笔记内容是否是该用户的隐私信息，应遵守用户隐私保护规范，不透露隐私内容。
 
 运行示例：若用户A在群里说“我是本群最菜的飞车玩家”，这属于群内公开的事件与调侃素材，你可以将其记录在【全局区】。当后续用户B与你聊天时，你可以直接看到该笔记内容，自然地与用户B共享或调侃这个梗，实现多用户间的记忆连贯性。
-\n"""
+"""
         ]
         if notes:
             note_str = ''.join([f"[{i}] {j}\n" for i, j in enumerate(notes)])
@@ -233,20 +340,24 @@ class Main(Star):
         if global_notes:
             global_note_str = ''.join([f"[{i}] {j}\n" for i, j in enumerate(global_notes)])
             prompt_segments.append(f"\n这是当前全局区的笔记内容：\n{global_note_str}")
-
-        prompt = "\n".join(prompt_segments)
+        prompt_segments.append("\n</note>")
+        prompt = "\n\n" + "\n".join(prompt_segments) + "\n\n"
         #由于注入用户提示词会造成上下文大量重复内容，改注入到系统提示词更优
         req.system_prompt += prompt
         logger.debug(f"已注入笔记内容到系统提示词：\n{prompt}")
+        asyncio.create_task(self.cache.记录用户信息(event))
 
     @filter.command(command_name="清空笔记")
-    async def command_del_note(self, event: AstrMessageEvent, group_id = None):
+    async def command_clear_note(self, event: AstrMessageEvent, group_id = None):
         """清空笔记，规则：
         非管理员只能在私聊情况下清空llm为自己记录的笔记，
         管理员可清空群笔记，且一次性将清空该群所有笔记"""
         原群ID = str(event.get_group_id() or '')
         用户ID = str(event.get_sender_id())
         if not event.is_admin():
+            if time.time() < self.清空冷却时间.get(用户ID, 0):
+                yield event.plain_result("⚠️ 你刚刚才清空过一次,请勿频繁操作")
+                return
             if 原群ID:
                 yield event.plain_result("❌️ 只有管理员可以操作群数据")
                 return
@@ -276,12 +387,32 @@ class Main(Star):
                 return
         时间 = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
         删除前文件 = f"data_{'群' if 操作群 else '私'}{操作ID}删除前数据_{时间}.json"
-        self.note.write_json_to_file(删除前数据, 删除前文件)
+        for i in r'<>:"/\|?*':
+            删除前文件 = 删除前文件.replace(i, "❓")
+        格式化数据 = {
+            "id": 操作ID,
+            "type": "group" if 操作群 else "private",
+            "data": 删除前数据
+        }
+        if not event.is_admin():
+            self.清空冷却时间[用户ID] = time.time() + 600
+        self.note.write_json_to_file(格式化数据, 删除前文件)
         if 操作群:
-            self.note.del_group_note(操作ID)
+            成功 = self.note.del_group_note(操作ID)
         else:
-            self.note.del_private_note(操作ID)
-        yield event.plain_result(f"清空成功，若要恢复，请使用\n/恢复笔记 {删除前文件}")
+            成功 = self.note.del_private_note(操作ID)
+        if 成功:
+            if self.自动删除时长 > 0:
+                msg = (
+                    f"清空成功，备份文件 {删除前文件} 已保存。"
+                    f"若需恢复，请在{self.自动删除时长}小时内使用 /恢复笔记 {删除前文件}，"
+                    f"{self.自动删除时长}小时后将自动删除。"
+                )
+            else:
+                msg = f"清空成功，备份文件 {删除前文件} 已永久保存。可使用 /恢复笔记 {删除前文件} 恢复。"
+            yield event.plain_result(msg)
+        else:
+            yield event.plain_result("❌️ 清空失败,请到控制台或插件数据目录的error.log查看错误日志")
 
     @filter.command(command_name="恢复笔记")
     async def command_恢复note(self, event: AstrMessageEvent, file_name: str = None):
@@ -299,36 +430,66 @@ class Main(Star):
             yield event.plain_result("❌️ 文件名不合法")
             return
         用户ID = str(event.get_sender_id())
-        if not file_name.startswith(("data_私", "data_群")):
-            yield event.plain_result("文件名不符合规范，请确保文件名前缀可识别，如`data_群`，`data_私`")
+        if not event.is_admin():
+            if time.time() < self.恢复冷却时间.get(用户ID, 0):
+                yield event.plain_result("⚠️ 你刚刚才恢复过一次,请勿频繁操作")
+                return
+        file_data = self.note.read_json_file(file_name)
+        if not file_data:
+            yield event.plain_result("❌️ 文件数据获取失败，请到控制台或插件数据目录的error.log查看错误日志")
             return
-        if file_name.startswith("data_群"):
+        try:
+            类型 = file_data["type"]
+            识别ID = file_data["id"]
+            data = file_data["data"]
+        except KeyError as e:
+            yield event.plain_result(f"❌️ 文件数据格无法解析：{e}")  # KeyError错误信息一般安全
+            return
+        for i in (类型, 识别ID):
+            if not isinstance(i, str):
+                yield event.plain_result(f"❌️ 数据文件中的校验数据格式不对，期望类型：str，实际类型：{type(data).__name__}")
+                return
+        if not data:
+            yield event.plain_result(f"❌️ 数据文件中的数据无效，无可用数据")
+            return
+        if 类型 == "group":
+            if not isinstance(data, dict):
+                yield event.plain_result(f"❌️ 数据文件中的数据格式不对，期望类型：dict，实际类型：{type(data).__name__}")
+                return
             文件是群数据 = True
-        elif file_name.startswith("data_私"):
+        elif 类型 == "private":
+            if not isinstance(data, list):
+                yield event.plain_result(f"❌️ 数据文件中的数据格式不对，期望类型：list，实际类型：{type(data).__name__}")
+                return
             文件是群数据 = False
         else:
-            return #理论上不存在，因为前面已经`startswith(("data_私", "data_群"))`了
-        try:
-            识别ID = file_name[len("data_私"):].split("删除前数据_")[0]
-        except IndexError:
-            yield event.plain_result("❌️ 未提取到识别ID，请确保文件名正确")
+            yield event.plain_result(f"❌️ 文件的ID类型未知：{类型}")
             return
+        if not event.is_admin():
+            self.恢复冷却时间[用户ID] = time.time() + 600
         if 文件是群数据:
             if not event.is_admin():
                 yield event.plain_result("❌️ 只有管理员可以操作群数据")
                 return
-            if self.note.重载group_note(识别ID, file_name):
-                yield event.plain_result(f"✅️ 成功从 {file_name} 重载群 {识别ID} 的数据")
-            else:
-                yield event.plain_result(f"❌️ 重载失败，可能文件不存在或无效，请到控制台查看错误日志")
+            成功 = self.note.重载group_note(识别ID, data)
         else:
             if 识别ID != 用户ID:
                 yield event.plain_result("❌️ 不可以恢复其他人的数据给自己")
                 return
-            if self.note.重载private_note(识别ID, file_name):
-                yield event.plain_result(f"✅️ 成功从 {file_name} 重载 {识别ID} 的数据")
-            else:
-                yield event.plain_result(f"❌️ 重载失败，可能文件不存在或无效，请到控制台查看错误日志")
+            成功 = self.note.重载private_note(识别ID, data)
+        if 成功:
+            yield event.plain_result(f"✅️ 成功从 {file_name} 重载{'群' + 识别ID + '的' if 文件是群数据 else ''}数据")
+        else:
+            yield event.plain_result(f"❌️ 重载失败，可能文件不存在或无效，请到控制台或插件数据目录的error.log查看错误日志")
+
+    @filter.command(command_name="清空笔记日志")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def 清空笔记日志(self, event: AstrMessageEvent):
+        """清空笔记日志文件记录的错误日志"""
+        if self.note.clear_error():
+            yield event.plain_result("✅️ 清空成功")
+        else:
+            yield event.plain_result("❌️ 清空失败，请到控制台查看错误日志")
 
     @filter.llm_tool(name="edit_note")
     async def llm_tool_edit_note(
@@ -386,6 +547,7 @@ class Main(Star):
             except (ValueError, TypeError) as e:
                 错误信息.append(f"执行 {action} 时索引转换错误：{op.get('index')}。")
                 logger.error(f"大模型调用工具出错，索引无法转换{action}-{op.get('index')}，{e}", exc_info=True)
+                self.note.add_log(f"大模型调用工具出错，索引无法转换{action}-{op.get('index')}，{e}")
                 continue
 
             content = str(op.get("content", ""))
@@ -469,7 +631,7 @@ class Main(Star):
 
         data = self.note.get_group_note(group_id)
         result = {}  # type: dict[str, list[str]]
-        group_info = self.user_info_cache.get(group_id, {})
+        group_info = self.cache.user_info_cache.get(group_id, {})
         for uid, notes in data.items():
             for note in notes:
                 if keyword in note.lower():
@@ -490,6 +652,8 @@ class Main(Star):
         lines = ["搜索到以下笔记："]
         n = 0
         for user_key, notes in result.items():
+            if user_key == "global":
+                user_key = "【全局笔记】"
             lines.append(f"📌 {user_key}：")
             for note in notes:
                 if n >= MAX_NOTES:
@@ -520,7 +684,7 @@ class Main(Star):
         group_id = str(event.get_group_id() or '')
         if not group_id:
             return "当前为私聊，只有当前用户，无法获取其他用户"
-        group_data = self.user_info_cache.get(group_id, {})
+        group_data = self.cache.user_info_cache.get(group_id, {})
         if user_id in group_data:
             user_name = group_data[user_id]
         else:
@@ -541,7 +705,7 @@ class Main(Star):
     async def llm_tool_get_user_id(self, event: AstrMessageEvent, user_name: str = None) -> str:
         """通过名字获取用户ID
         Args:
-            user_name(string): 用户名字
+            user_name(string): 用户名字，不区分大小写
         Returns:
             匹配到的用户 ID 及昵称列表（可能多个）。
         """
@@ -564,22 +728,22 @@ class Main(Star):
                     name = member.get('card') or member.get('nickname') or ''
                     if not name:
                         continue
-                    name = name.strip().lower()
-                    if user_name in name or name in user_name:
+                    lname = name.strip().lower()
+                    if user_name in lname or lname in user_name:
                         result[str(member['user_id'])] = name
 
                 if result:
                     return '\n'.join(f"用户{name}的ID为：{_id}" for _id, name in result.items())
                 # 若 API 返回空结果，也走缓存逻辑（可选）
-            except Exception:
-                # 调用失败时静默回退到缓存
-                pass
+            except Exception as e:
+                logger.warning(f"使用onebot api获取成员数据失败，回退缓存：{e}")
 
         # 原有缓存逻辑（私聊已提前返回，此处仅在群聊且非 API 或 API 失败时执行）
-        group_data = self.user_info_cache.get(group_id, {})
+        group_data = self.cache.user_info_cache.get(group_id, {})
         result = {}
         for _id, name in group_data.items():
-            if user_name in name or name in user_name:
+            lname = name.strip().lower()
+            if user_name in lname or lname in user_name:
                 result[_id] = name
 
         if not result:
