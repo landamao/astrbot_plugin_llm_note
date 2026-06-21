@@ -447,7 +447,7 @@ class Main(Star):
             return
         for i in (类型, 识别ID):
             if not isinstance(i, str):
-                yield event.plain_result(f"❌️ 数据文件中的校验数据格式不对，期望类型：str，实际类型：{type(data).__name__}")
+                yield event.plain_result(f"❌️ 数据文件中的校验数据格式不对，期望类型：str，实际类型：{type(i).__name__}")
                 return
         if not data:
             yield event.plain_result(f"❌️ 数据文件中的数据无效，无可用数据")
