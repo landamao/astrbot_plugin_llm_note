@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import time
 from pathlib import Path
 from collections import OrderedDict
@@ -12,17 +13,77 @@ from astrbot.api.all import logger, AstrMessageEvent, Context, Star, AstrBotConf
 class Note:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
-        self.data_path = self.data_dir / "data.json"
+        self.db_path = self.data_dir / "notes.db"
         self.error_path = self.data_dir / "error.log"
-        self._ensure_file()
-        #单线程异步不用锁了，全文没有一个await让出
+        self.legacy_path = self.data_dir / "data.json"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+        self._migrate_legacy()
+        #单线程异步不用锁了
 
-    def _ensure_file(self):
-        """确保 JSON 数据文件存在，不存在则初始化为空字典"""
-        if not self.data_path.exists():
-            self.data_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.data_path, 'w', encoding='utf-8') as f:
-                json.dump({}, f, ensure_ascii=False)
+    def _init_db(self):
+        """初始化 SQLite 数据库，创建表结构"""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS notes (
+                    group_id  TEXT NOT NULL,
+                    user_id   TEXT NOT NULL,
+                    idx       INTEGER NOT NULL,
+                    content   TEXT NOT NULL,
+                    PRIMARY KEY (group_id, user_id, idx)
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_notes_group
+                ON notes (group_id)
+            """)
+
+    def _migrate_legacy(self):
+        """如果数据库为空且存在旧版 data.json，则导入数据并重命名旧文件"""
+        with self._conn() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+        if count > 0:
+            return
+        if not self.legacy_path.exists():
+            return
+        try:
+            with open(self.legacy_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.error(f"迁移旧数据时读取 data.json 失败：{e}", exc_info=True)
+            self.add_log(f"迁移旧数据时读取 data.json 失败：{e}")
+            return
+        if not data or not isinstance(data, dict):
+            return
+        try:
+            with self._conn() as conn:
+                for group_id, users in data.items():
+                    if not isinstance(users, dict):
+                        continue
+                    for user_id, notes in users.items():
+                        if not isinstance(notes, list):
+                            continue
+                        for idx, content in enumerate(notes):
+                            if content is None:
+                                continue
+                            conn.execute(
+                                "INSERT OR IGNORE INTO notes (group_id, user_id, idx, content) VALUES (?,?,?,?)",
+                                (str(group_id), str(user_id), idx, str(content)),
+                            )
+            backup_name = self.legacy_path.with_name(self.legacy_path.name + ".bak")
+            self.legacy_path.rename(backup_name)
+            logger.info(f"旧版 data.json 已迁移到数据库，原文件重命名为 {backup_name.name}")
+        except Exception as e:
+            logger.error(f"迁移旧数据写入数据库失败：{e}", exc_info=True)
+            self.add_log(f"迁移旧数据写入数据库失败：{e}")
+
+    def _conn(self) -> sqlite3.Connection:
+        """获取数据库连接（开启 WAL 模式提升并发读性能）"""
+        conn = sqlite3.connect(str(self.db_path), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
 
     def _resolve_path(self, file_name: str) -> Path | None:
         """将文件名解析为数据目录内的安全路径，拦截目录穿越"""
@@ -33,64 +94,66 @@ class Note:
             logger.error(log)
             self.add_log(log)
             return None
-        if target_path == self.data_path.resolve():
-            log = f"禁止直接操作核心数据文件: {self.data_path}，请使用专用接口"
+        if target_path == self.db_path.resolve():
+            log = f"禁止直接操作核心数据库文件: {self.db_path}，请使用专用接口"
             logger.error(log)
             self.add_log(log)
             return None
         return target_path
 
     def _read_data(self, file_name=None) -> dict | list | None:
-        """读取底层 JSON 数据，file_name可选，文件内容必须是json格式的"""
+        """读取指定 JSON 文件（仅用于备份/恢复文件，不读核心数据库）"""
         if file_name is None:
-            path = self.data_path
-        else:
-            path = self._resolve_path(file_name)
-            if path is None:
-                return None
+            return None
+        path = self._resolve_path(file_name)
+        if path is None:
+            return None
         try:
-            with open(path, 'r', encoding='utf-8') as f:
+            with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            if path == self.data_path.resolve():
-                raise  #核心数据文件出错直接崩溃处理
             logger.error(f"读取数据失败\n路径：{path}\n错误：{e}", exc_info=True)
             self.add_log(f"读取数据失败\n路径：{path}\n错误：{e}")
             return None
 
-    def _write_data(self, data: dict|list, file_name=None) -> bool | None:
-        """写入底层 JSON 数据（原子写入，防止中途崩溃导致数据损坏），返回是否写入成功"""
-        if file_name is None:
-            path = self.data_path
-        else:
-            path = self._resolve_path(file_name)
-            if path is None:
-                return None
+    def _write_data(self, data: dict | list, file_name: str) -> bool | None:
+        """写入指定 JSON 文件（原子写入，用于备份/恢复文件）"""
+        path = self._resolve_path(file_name)
+        if path is None:
+            return None
         try:
             tmp_path = path.with_suffix(".tmp")
-            with open(tmp_path, 'w', encoding='utf-8') as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
             tmp_path.replace(path)
             return True
         except Exception as e:
-            if path == self.data_path.resolve():
-                raise  #核心数据文件出错直接崩溃处理
             logger.error(f"写入文件失败\n路径：{path}\n数据：{data}\n错误：{e}", exc_info=True)
             self.add_log(f"写入文件失败\n路径：{path}\n数据：{data}\n错误：{e}")
             return False
 
     def get_user_note(self, group_id: str, user_id: str) -> list[str]:
         """获取特定群组/私聊下用户的笔记列表"""
-        data = self._read_data()
-        return data.get(str(group_id), {}).get(str(user_id), [])
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT content FROM notes WHERE group_id=? AND user_id=? ORDER BY idx",
+                (str(group_id), str(user_id)),
+            ).fetchall()
+        return [row[0] for row in rows]
 
-    def get_group_note(self, group_id: str) -> dict[str,list[str]]:
+    def get_group_note(self, group_id: str) -> dict[str, list[str]]:
         """获取特定群组下的所有笔记"""
         if group_id == "private":
-            #私聊无群组一说，也不可见其他人的
             return {}
-        data = self._read_data()
-        return data.get(str(group_id), {})
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT user_id, content FROM notes WHERE group_id=? ORDER BY user_id, idx",
+                (str(group_id),),
+            ).fetchall()
+        result: dict[str, list[str]] = {}
+        for user_id, content in rows:
+            result.setdefault(user_id, []).append(content)
+        return result
 
     def get_private_note(self, user_id: str) -> list[str]:
         """获取私聊特定用户的数据"""
@@ -99,9 +162,8 @@ class Note:
     def get_global_notes(self, group_id: str) -> list[str]:
         """获取群组的全局笔记"""
         if group_id == "private":
-            return []  # 私聊不可见其他用户的
-        # 全局群笔记直接以 "global" 作为特殊的 user_id 存储在当前 group_id 下
-        return self.get_user_note(group_id,"global")
+            return []
+        return self.get_user_note(group_id, "global")
 
     def set_global_notes(self, group_id: str, new_notes: list[str]) -> bool:
         """写入全局笔记"""
@@ -109,68 +171,120 @@ class Note:
 
     def set_user_note(self, group_id: str, user_id: str, new_notes: list[str]) -> bool:
         """覆盖更新用户的笔记列表（包含全局笔记）"""
-        data = self._read_data()
         group_id, user_id = str(group_id), str(user_id)
-
-        if group_id not in data:
-            data[group_id] = {}
-
-        data[group_id][user_id] = new_notes
-        return self._write_data(data)
+        try:
+            with self._conn() as conn:
+                conn.execute(
+                    "DELETE FROM notes WHERE group_id=? AND user_id=?",
+                    (group_id, user_id),
+                )
+                if new_notes:
+                    conn.executemany(
+                        "INSERT INTO notes (group_id, user_id, idx, content) VALUES (?,?,?,?)",
+                        [(group_id, user_id, idx, content) for idx, content in enumerate(new_notes)],
+                    )
+            return True
+        except Exception as e:
+            logger.error(f"写入笔记失败：{e}", exc_info=True)
+            self.add_log(f"写入笔记失败：{e}")
+            return False
 
     def del_group_note(self, group_id: str) -> bool:
         """删除指定群的笔记"""
         group_id = str(group_id)
-        data = self._read_data()
-        if group_id not in data:
+        try:
+            with self._conn() as conn:
+                conn.execute("DELETE FROM notes WHERE group_id=?", (group_id,))
             return True
-        del data[group_id]
-        return self._write_data(data)
+        except Exception as e:
+            logger.error(f"删除群笔记失败：{e}", exc_info=True)
+            self.add_log(f"删除群笔记失败：{e}")
+            return False
 
     def del_private_note(self, user_id: str) -> bool:
         """删除私聊指定用户的笔记"""
         user_id = str(user_id)
-        data = self._read_data()
-        if "private" not in data:
+        try:
+            with self._conn() as conn:
+                conn.execute(
+                    "DELETE FROM notes WHERE group_id='private' AND user_id=?",
+                    (user_id,),
+                )
             return True
-        if user_id not in data["private"]:
-            return True
-        del data["private"][user_id]
-        return self._write_data(data)
+        except Exception as e:
+            logger.error(f"删除私聊笔记失败：{e}", exc_info=True)
+            self.add_log(f"删除私聊笔记失败：{e}")
+            return False
 
-    def 重载group_note(self, group_id:str, data:dict) -> bool:
+    def 重载group_note(self, group_id: str, data: dict) -> bool:
         """从数据重载某个群组的数据"""
         group_id = str(group_id)
-        now_data = self._read_data()
-        now_data[group_id] = data
-        return self._write_data(now_data)
+        if not isinstance(data, dict):
+            return False
+        try:
+            with self._conn() as conn:
+                conn.execute("DELETE FROM notes WHERE group_id=?", (group_id,))
+                rows = []
+                for uid, notes in data.items():
+                    if not isinstance(notes, list):
+                        continue
+                    for idx, content in enumerate(notes):
+                        if content is not None:
+                            rows.append((group_id, str(uid), idx, str(content)))
+                if rows:
+                    conn.executemany(
+                        "INSERT INTO notes (group_id, user_id, idx, content) VALUES (?,?,?,?)",
+                        rows,
+                    )
+            return True
+        except Exception as e:
+            logger.error(f"重载群笔记失败：{e}", exc_info=True)
+            self.add_log(f"重载群笔记失败：{e}")
+            return False
 
-    def 重载private_note(self, user_id:str, data:list) -> bool:
-        """从数据目录的某个文件重载某个私聊用户的数据"""
+    def 重载private_note(self, user_id: str, data: list) -> bool:
+        """从数据重载某个私聊用户的数据"""
         user_id = str(user_id)
-        now_data = self._read_data()
-        key = "private"
-        if key not in now_data:
-            now_data[key] = {}
-        now_data[key][user_id] = data
-        return self._write_data(now_data)
+        if not isinstance(data, list):
+            return False
+        try:
+            with self._conn() as conn:
+                conn.execute(
+                    "DELETE FROM notes WHERE group_id='private' AND user_id=?",
+                    (user_id,),
+                )
+                rows = [
+                    ("private", user_id, idx, str(content))
+                    for idx, content in enumerate(data)
+                    if content is not None
+                ]
+                if rows:
+                    conn.executemany(
+                        "INSERT INTO notes (group_id, user_id, idx, content) VALUES (?,?,?,?)",
+                        rows,
+                    )
+            return True
+        except Exception as e:
+            logger.error(f"重载私聊笔记失败：{e}", exc_info=True)
+            self.add_log(f"重载私聊笔记失败：{e}")
+            return False
 
-    def write_json_to_file(self, data:dict|list, file_name:str) -> bool:
+    def write_json_to_file(self, data: dict | list, file_name: str) -> bool:
         """在数据目录写入json到指定文件"""
         return self._write_data(data, file_name)
 
-    def read_json_file(self, file_name:str) -> dict | list | None:
+    def read_json_file(self, file_name: str) -> dict | list | None:
         return self._read_data(file_name)
 
-    def delete_file(self, file_name:str) -> bool:
+    def delete_file(self, file_name: str) -> bool:
         """删除数据目录下指定文件"""
         path = self._resolve_path(file_name)
+        if path is None:
+            return False
         if path == self.error_path.resolve():
             log = f"❓可能是非管理员操作，不应该直接删除日志文件，应该使用清空方法"
             logger.warning(log)
             self.add_log(log)
-            return False
-        if path is None:
             return False
         try:
             path.unlink()
@@ -180,11 +294,11 @@ class Note:
             self.add_log(f"删除文件失败，路径：{path}\n错误：{e}")
             return False
 
-    def add_log(self, text:str) -> None:
+    def add_log(self, text: str) -> None:
         try:
             timestamp = time.strftime("%Y-%m-%d-%H-%M-%S")
             with open(self.error_path, "a", encoding="utf-8") as f:
-                f.write(f"[{timestamp}] {text}\n\n")  # 加上换行符，便于区分日志条目
+                f.write(f"[{timestamp}] {text}\n\n")
         except Exception as e:
             logger.warning(f"错误日志写入文件失败：{e}", exc_info=True)
 
@@ -196,6 +310,7 @@ class Note:
         except Exception as e:
             logger.error(f"清空日志文件失败：{e}", exc_info=True)
             return False
+
 
 class Cache:
     def __init__(self):
@@ -248,16 +363,17 @@ class Cache:
                         if not self.user_info_cache[old_group]:
                             del self.user_info_cache[old_group]
 
+
 class Main(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
-        self.自动删除时长 = config['自动删除时长'] # type: int # n小时，0代表永不
+        self.自动删除时长 = config['自动删除时长']  # type: int # n小时，0代表永不
         self.data_dir = StarTools.get_data_dir()  # type: Path
         self.note = Note(self.data_dir)
         self.cache = Cache()
-        self.清空冷却时间 = {} # type: dict[str, float]
+        self.清空冷却时间 = {}  # type: dict[str, float]
         self.恢复冷却时间 = {}  # type: dict[str, float]
-        self._clean_task = None  # 新增
+        self._clean_task = None
 
     async def initialize(self) -> None:
         """可选异步初始化，当插件被激活时会调用这个方法"""
@@ -266,7 +382,6 @@ class Main(Star):
 
     async def terminate(self) -> None:
         """可选异步终止，当插件被关闭时调用这个方法"""
-        # 终止时取消任务
         if self._clean_task:
             self._clean_task.cancel()
             try:
@@ -292,7 +407,7 @@ class Main(Star):
             # 跳过核心数据文件
             if f.name == "data.json":
                 continue
-            # 仅清理符合备份命名规则的文件（文件名包含“删除前数据”）
+            # 仅清理符合备份命名规则的文件（文件名包含"删除前数据"）
             if "删除前数据" in f.name:
                 try:
                     if f.stat().st_mtime < cutoff:
@@ -322,7 +437,7 @@ class Main(Star):
         prompt_segments = [
 """<note>
 【动态记忆与私密笔记协议】
-本文本是你的私密笔记，仅对你可见。你可以根据聊天语境，选择性地将笔记内容转化为对话线索透露给用户：
+本文是你的私密笔记，仅对你可见，你可以根据聊天语境，选择性地将笔记内容转化为对话线索透露给用户：
 
 用户区（个人画像）：仅记录当前用户的独特偏好、习惯或对用户的好感、印象，关系等。
 
@@ -330,7 +445,7 @@ class Main(Star):
 
 隐私保护规范：甄别笔记内容是否是该用户的隐私信息，应遵守用户隐私保护规范，不透露隐私内容。
 
-运行示例：若用户A在群里说“我是本群最菜的飞车玩家”，这属于群内公开的事件与调侃素材，你可以将其记录在【全局区】。当后续用户B与你聊天时，你可以直接看到该笔记内容，自然地与用户B共享或调侃这个梗，实现多用户间的记忆连贯性。
+运行示例：若用户A在群里说"我是本群最菜的飞车玩家"，这属于群内公开的事件与调侃素材，你可以将其记录在【全局区】。当后续用户B与你聊天时，你可以直接看到该笔记内容，自然地与用户B共享或调侃这个梗，实现多用户间的记忆连贯性。
 """
         ]
         if notes:
@@ -348,7 +463,7 @@ class Main(Star):
         asyncio.create_task(self.cache.记录用户信息(event))
 
     @filter.command(command_name="清空笔记")
-    async def command_clear_note(self, event: AstrMessageEvent, group_id = None):
+    async def command_clear_note(self, event: AstrMessageEvent, group_id=None):
         """清空笔记，规则：
         非管理员只能在私聊情况下清空llm为自己记录的笔记，
         管理员可清空群笔记，且一次性将清空该群所有笔记"""
@@ -557,7 +672,7 @@ class Main(Star):
                 index = len(raw_notes) + index
             if action == "delete":
                 if 0 <= index < len(temp_notes):
-                    temp_notes[index] = None # type: ignore
+                    temp_notes[index] = None  # type: ignore
                 else:
                     错误信息.append(f"删除失败：索引 {op.get('index')} 越界或不存在。")
             elif action == "replace":
@@ -610,7 +725,7 @@ class Main(Star):
         note_str = '\n'.join([f"{i}.{j}\n" for i, j in enumerate(new_notes)])
         result = f"这是操作后的{'全局' if user_id == 'global' else '个人'}笔记本内容：\n{note_str}"
         if 丢弃note:
-            result += f"\n\n笔记数量超出，以下{len(丢弃note)}条笔记内容已被丢弃：" + '\n'.join(f"[{i+1}] {j}" for i,j in enumerate(丢弃note))
+            result += f"\n\n笔记数量超出，以下{len(丢弃note)}条笔记内容已被丢弃：" + '\n'.join(f"[{i+1}] {j}" for i, j in enumerate(丢弃note))
         if 错误信息:
             result += "\n\n发生错误的有：" + '\n'.join(错误信息)
         return result

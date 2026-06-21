@@ -5,6 +5,21 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
 ---
 
+## [v2.0.0] - 2026-06-22
+
+### 重构
+- **存储引擎迁移**：`Note` 类底层从 JSON 文件（`data.json`）改为 SQLite 数据库（`notes.db`），开启 WAL 模式提升并发读性能
+- 表结构：`notes (group_id TEXT, user_id TEXT, idx INTEGER, content TEXT)`，主键 `(group_id, user_id, idx)`，索引 `group_id`
+- `_read_data` / `_write_data` 不再操作核心数据文件，仅保留用于备份/恢复 JSON 文件操作
+- `get_user_note` / `get_group_note` / `set_user_note` / `del_group_note` / `del_private_note` / `重载group_note` / `重载private_note` 全部改为 SQL 操作
+- `_resolve_path` 核心文件保护从 `data.json` 改为 `notes.db`
+
+### 新增
+- **自动迁移**：插件初始化时检测数据库是否为空，若为空且存在旧版 `data.json`，自动读取 JSON 数据导入数据库，完成后将 `data.json` 重命名为 `data.json.bak`
+- 迁移过程出错时记录 error.log，不阻断插件启动
+
+---
+
 ## [v1.8.1] - 2026-06-22
 
 ### 修复
