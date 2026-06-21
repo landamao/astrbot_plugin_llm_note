@@ -298,7 +298,6 @@ class Main(Star):
         if '/' in file_name or '\\' in file_name:
             yield event.plain_result("❌️ 文件名不合法")
             return
-        原群ID = str(event.get_group_id() or '')
         用户ID = str(event.get_sender_id())
         if not file_name.startswith(("data_私", "data_群")):
             yield event.plain_result("文件名不符合规范，请确保文件名前缀可识别，如`data_群`，`data_私`")
@@ -317,9 +316,6 @@ class Main(Star):
         if 文件是群数据:
             if not event.is_admin():
                 yield event.plain_result("❌️ 只有管理员可以操作群数据")
-                return
-            if 识别ID != 原群ID:
-                yield event.plain_result("❌️ 不可以恢复其他群的到当前群")
                 return
             if self.note.重载group_note(识别ID, file_name):
                 yield event.plain_result(f"✅️ 成功从 {file_name} 重载群 {识别ID} 的数据")
