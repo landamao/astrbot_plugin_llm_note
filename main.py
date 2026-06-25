@@ -448,7 +448,7 @@ class Main(Star):
             for gid, users in all_data.items():
                 if user_id in users:
                     for note in users[user_id]:
-                        prefix = "[来自其他会话] " if gid != group_id else ""
+                        prefix = "[来自其他会话，仅供参考] " if gid != group_id else ""
                         user_notes_lines.append(prefix + note)
             # 当前群的global笔记
             if group_id in all_data and "global" in all_data[group_id]:
