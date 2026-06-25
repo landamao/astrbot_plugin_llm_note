@@ -1,6 +1,6 @@
 name: 笔记本
 display_name: 笔记本
 desc: 给llm添加笔记的笔记本
-version: v2.0.0
+version: v2.1.1
 author: 懒大猫
 repo: https://github.com/landamao/astrbot_plugin_llm_note

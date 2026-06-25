@@ -294,6 +294,17 @@ class Note:
             self.add_log(f"删除文件失败，路径：{path}\n错误：{e}")
             return False
 
+    def get_all_data(self) -> dict[str, dict[str, list[str]]]:
+        """获取所有群组的全部笔记数据，格式: {group_id: {user_id: [notes]}}"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT group_id, user_id, content FROM notes ORDER BY group_id, user_id, idx",
+            ).fetchall()
+        result: dict[str, dict[str, list[str]]] = {}
+        for group_id, user_id, content in rows:
+            result.setdefault(group_id, {}).setdefault(user_id, []).append(content)
+        return result
+
     def add_log(self, text: str) -> None:
         try:
             timestamp = time.strftime("%Y-%m-%d-%H-%M-%S")
@@ -368,6 +379,7 @@ class Main(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.自动删除时长 = config['自动删除时长']  # type: int # n小时，0代表永不
+        self.全局共享笔记 = config.get('全局共享笔记', False)  # type: bool
         self.data_dir = StarTools.get_data_dir()  # type: Path
         self.note = Note(self.data_dir)
         self.cache = Cache()
@@ -427,11 +439,29 @@ class Main(Star):
         group_id = str(event.get_group_id() or "private")
         user_name = event.get_sender_name()
 
-        notes = self.note.get_user_note(group_id, user_id)
-        global_notes = self.note.get_global_notes(group_id)
+        user_notes_lines = []
+        global_notes_lines = []
 
-        # 如果个人笔记和全局笔记都为空，则不注入 prompt
-        if not notes and not global_notes:
+        if self.全局共享笔记:
+            # 全局共享模式：遍历所有群组，仅注入当前群global
+            all_data = self.note.get_all_data()
+            for gid, users in all_data.items():
+                if user_id in users:
+                    for note in users[user_id]:
+                        prefix = "[来自其他会话] " if gid != group_id else ""
+                        user_notes_lines.append(prefix + note)
+            # 当前群的global笔记
+            if group_id in all_data and "global" in all_data[group_id]:
+                for note in all_data[group_id]["global"]:
+                    global_notes_lines.append(note)
+        else:
+            # 原有模式：仅当前群组
+            for note in self.note.get_user_note(group_id, user_id):
+                user_notes_lines.append(note)
+            for note in self.note.get_global_notes(group_id):
+                global_notes_lines.append(note)
+
+        if not user_notes_lines and not global_notes_lines:
             return
 
         prompt_segments = [
@@ -448,12 +478,12 @@ class Main(Star):
 运行示例：若用户A在群里说"我是本群最菜的飞车玩家"，这属于群内公开的事件与调侃素材，你可以将其记录在【全局区】。当后续用户B与你聊天时，你可以直接看到该笔记内容，自然地与用户B共享或调侃这个梗，实现多用户间的记忆连贯性。
 """
         ]
-        if notes:
-            note_str = ''.join([f"[{i}] {j}\n" for i, j in enumerate(notes)])
+        if user_notes_lines:
+            note_str = ''.join(f"[{i}] {j}\n" for i, j in enumerate(user_notes_lines))
             prompt_segments.append(f"\n这是你为当前用户 {user_name}（{user_id}) 记录的笔记本内容（格式：[索引] 内容\\n\\n）：\n{note_str}")
 
-        if global_notes:
-            global_note_str = ''.join([f"[{i}] {j}\n" for i, j in enumerate(global_notes)])
+        if global_notes_lines:
+            global_note_str = ''.join(f"[{i}] {j}\n" for i, j in enumerate(global_notes_lines))
             prompt_segments.append(f"\n这是当前全局区的笔记内容：\n{global_note_str}")
         prompt_segments.append("\n</note>")
         prompt = "\n\n" + "\n".join(prompt_segments) + "\n\n"
