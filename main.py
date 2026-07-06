@@ -649,7 +649,7 @@ class Main(Star):
         索引位移问题注意：在一次完整调用中，同时进行删除、插入等操作时，索引不会发生位移，所有操作必须基于原始索引执行，禁止自行计算索引偏移，内部实现先标记删除（None 占位），再按原始索引顺序重组列表，最后统一清理占位符。
         Args:
             user_id(string): 用户ID，不填默认为当前用户区。若填 "global"，则记录到全局区
-            operations(array): 操作列表，每个元素是一个对象(object)，包含 action、index、content 三个字段。
+            operations(array[object]): 操作列表，每个元素是一个对象(object)，包含 action、index、content 三个字段。
                 字段说明：
                 - action(string): 必填，操作类型。可选值 "add"（添加）、"delete"（删除）、"replace"（替换）
                 - index(number): 必填，目标索引，从0开始，遵循编程规范，可为负。

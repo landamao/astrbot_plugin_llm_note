@@ -5,6 +5,13 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
 ---
 
+## [v2.1.2] - 2026-07-06
+
+### 修复
+- 修正 `edit_note` 工具中 `operations` 参数的类型标注，从 `array` 改为 `array[object]`，避免 LLM 工具注册和调用时对子项结构理解不明确
+
+---
+
 ## [v2.1.1] - 2026-06-25
 
 ### 新增

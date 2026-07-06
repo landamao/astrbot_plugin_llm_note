@@ -79,7 +79,7 @@ LLM 将会知晓这些信息，并在回答时参考。
 
 **参数**：
 - `user_id` (string, 可选) – 要操作的用户 ID，不填则默认当前用户；若传入 `"global"` 则操作群组全局笔记。
-- `operations` (array) – 操作列表，每个操作包含：
+- `operations` (array[object]) – 操作列表，每个操作包含：
   - `action` (string) – `"add"`、`"delete"` 或 `"replace"`
   - `index` (number) – 目标索引（0-based），可为负数（表示倒数）
   - `content` (string, 可选) – 对 `add`/`replace` 必填
