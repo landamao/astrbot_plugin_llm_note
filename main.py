@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -8,6 +9,28 @@ from astrbot.api.event import filter
 from astrbot.api.star import StarTools
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.all import logger, AstrMessageEvent, Context, Star, AstrBotConfig
+from astrbot.core.agent.message import TextPart
+
+
+# 旧笔记块匹配（含可选的 system_reminder 包裹），用于每轮清理历史上下文中的残留
+_NOTE_BLOCK_RE = re.compile(
+    r"(?:<system_reminder>\s*)?<note>.*?</note>(?:\s*</system_reminder>)?",
+    re.DOTALL,
+)
+
+# 系统提示词中的静态使用协议：内容恒定，不随笔记变动，模型提示词缓存可正常命中
+NOTE_PROTOCOL = """<note>
+【动态记忆与私密笔记协议】
+每轮对话中，用户消息之前会附带一个 <note> 笔记块，那是你的私密笔记，仅对你可见，你可以根据聊天语境，选择性地将笔记内容转化为对话线索透露给用户：
+
+用户区（个人画像）：仅记录当前用户的独特偏好、习惯或对用户的好感、印象，关系等。
+
+全局区（群组记忆）：记录群内的公共事件、共享知识或可公开的互动梗。
+
+隐私保护规范：甄别笔记内容是否是该用户的隐私信息，应遵守用户隐私保护规范，不透露隐私内容。
+
+运行示例：若用户A在群里说"我是本群最菜的飞车玩家"，这属于群内公开的事件与调侃素材，你可以将其记录在【全局区】。当后续用户B与你聊天时，你可以直接看到该笔记内容，自然地与用户B共享或调侃这个梗，实现多用户间的记忆连贯性。
+</note>"""
 
 
 class Note:
@@ -429,9 +452,51 @@ class Main(Star):
                     logger.error(f"删除备份文件 {f.name} 失败: {e}")
 
     # ---------- 原有逻辑 ----------
+    @staticmethod
+    def _清理旧笔记块(req: ProviderRequest) -> int:
+        """清理历史上下文中残留的旧笔记块，避免笔记内容跨轮重复堆积。
+
+        正常情况下笔记块以临时内容块注入（不落库），历史里不会有残留，
+        这里是兜底：拦截旧版本或其他路径写入历史的笔记块，返回清理的消息条数。
+        """
+        cleaned = 0
+        for ctx in req.contexts:
+            if not isinstance(ctx, dict) or ctx.get("role") != "user":
+                continue
+            content = ctx.get("content")
+            if isinstance(content, str) and "<note>" in content and "</note>" in content:
+                ctx["content"] = _NOTE_BLOCK_RE.sub("", content).strip()
+                cleaned += 1
+            elif isinstance(content, list):
+                has_note = any(
+                    isinstance(p, dict)
+                    and p.get("type") == "text"
+                    and "<note>" in (p.get("text") or "")
+                    and "</note>" in (p.get("text") or "")
+                    for p in content
+                )
+                if not has_note:
+                    continue
+                new_parts = []
+                for p in content:
+                    if (
+                        isinstance(p, dict)
+                        and p.get("type") == "text"
+                        and "<note>" in (p.get("text") or "")
+                        and "</note>" in (p.get("text") or "")
+                    ):
+                        cleaned += 1
+                        text = _NOTE_BLOCK_RE.sub("", p["text"]).strip()
+                        if text:
+                            new_parts.append({**p, "text": text})
+                    else:
+                        new_parts.append(p)
+                ctx["content"] = new_parts if new_parts else ""
+        return cleaned
+
     @filter.on_llm_request()
     async def llm请求前(self, event: AstrMessageEvent, req: ProviderRequest):
-        """llm请求前添加笔记信息"""
+        """llm请求前注入笔记：使用协议进系统提示词（静态），笔记内容进本轮 prompt（动态不落库）"""
         user_id = str(event.get_sender_id())
         self_id = str(event.get_self_id())
         if user_id == self_id:
@@ -461,35 +526,31 @@ class Main(Star):
             for note in self.note.get_global_notes(group_id):
                 global_notes_lines.append(note)
 
+        # 历史上下文里可能残留旧笔记块，每轮先清理，即使本轮已无笔记也要清
+        if self._清理旧笔记块(req):
+            logger.debug("已从历史上下文清理残留的旧笔记块")
+
         if not user_notes_lines and not global_notes_lines:
             return
 
-        prompt_segments = [
-"""<note>
-【动态记忆与私密笔记协议】
-本文是你的私密笔记，仅对你可见，你可以根据聊天语境，选择性地将笔记内容转化为对话线索透露给用户：
-
-用户区（个人画像）：仅记录当前用户的独特偏好、习惯或对用户的好感、印象，关系等。
-
-全局区（群组记忆）：记录群内的公共事件、共享知识或可公开的互动梗。
-
-隐私保护规范：甄别笔记内容是否是该用户的隐私信息，应遵守用户隐私保护规范，不透露隐私内容。
-
-运行示例：若用户A在群里说"我是本群最菜的飞车玩家"，这属于群内公开的事件与调侃素材，你可以将其记录在【全局区】。当后续用户B与你聊天时，你可以直接看到该笔记内容，自然地与用户B共享或调侃这个梗，实现多用户间的记忆连贯性。
-"""
-        ]
+        note_segments = []
         if user_notes_lines:
             note_str = ''.join(f"[{i}] {j}\n" for i, j in enumerate(user_notes_lines))
-            prompt_segments.append(f"\n这是你为当前用户 {user_name}（{user_id}) 记录的笔记本内容（格式：[索引] 内容\\n\\n）：\n{note_str}")
+            note_segments.append(f"这是你为当前用户 {user_name}（{user_id}) 记录的笔记本内容（格式：[索引] 内容\\n\\n）：\n{note_str}")
 
         if global_notes_lines:
             global_note_str = ''.join(f"[{i}] {j}\n" for i, j in enumerate(global_notes_lines))
-            prompt_segments.append(f"\n这是当前全局区的笔记内容：\n{global_note_str}")
-        prompt_segments.append("\n</note>")
-        prompt = "\n\n" + "\n".join(prompt_segments) + "\n\n"
-        #由于注入用户提示词会造成上下文大量重复内容，改注入到系统提示词更优
-        req.system_prompt += prompt
-        logger.debug(f"已注入笔记内容到系统提示词：\n{prompt}")
+            note_segments.append(f"这是当前全局区的笔记内容：\n{global_note_str}")
+        note_block = "<system_reminder>\n<note>\n" + "\n\n".join(note_segments) + "\n</note>\n</system_reminder>"
+
+        # 笔记内容注入到本轮用户消息之前，mark_as_temp 标记为临时内容块：
+        # 本轮对模型可见，但不写入会话历史，历史里始终只有最新一轮笔记，不会重复堆积；
+        # 同时笔记变化只影响末尾这一条消息，系统提示词与历史前缀不变，模型缓存可正常命中
+        req.leading_user_content_parts.append(TextPart(text=note_block).mark_as_temp())
+
+        # 使用协议是静态文本，追加到系统提示词（每次内容一致，不破坏缓存）
+        req.system_prompt += "\n\n" + NOTE_PROTOCOL
+        logger.debug(f"已注入笔记内容块到本轮 prompt（临时，不落库）：\n{note_block}")
         asyncio.create_task(self.cache.记录用户信息(event))
 
     @filter.command(command_name="清空笔记")
