@@ -1,8 +1,5 @@
-# Changelog
+# 更新日志
 
-本文件记录笔记本插件 (LLM Note) 的所有版本变更。
-
-格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
 ---
 
 ## [v2.2.0] - 2026-09-27
