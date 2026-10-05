@@ -505,6 +505,7 @@ class Main(Star):
         user_name = event.get_sender_name()
 
         user_notes_lines = []
+        other_session_notes_lines = []
         global_notes_lines = []
 
         if self.全局共享笔记:
@@ -513,8 +514,11 @@ class Main(Star):
             for gid, users in all_data.items():
                 if user_id in users:
                     for note in users[user_id]:
-                        prefix = "[来自其他会话，仅供参考] " if gid != group_id else ""
-                        user_notes_lines.append(prefix + note)
+                        if gid == group_id:
+                            user_notes_lines.append(note)
+                        else:
+                            # 其他会话的笔记单独存放：当前会话无法修改它们，不能编入索引
+                            other_session_notes_lines.append(note)
             # 当前群的global笔记
             if group_id in all_data and "global" in all_data[group_id]:
                 for note in all_data[group_id]["global"]:
@@ -530,7 +534,7 @@ class Main(Star):
         if self._清理旧笔记块(req):
             logger.debug("已从历史上下文清理残留的旧笔记块")
 
-        if not user_notes_lines and not global_notes_lines:
+        if not user_notes_lines and not global_notes_lines and not other_session_notes_lines:
             return
 
         note_segments = []
@@ -541,6 +545,11 @@ class Main(Star):
         if global_notes_lines:
             global_note_str = ''.join(f"[{i}] {j}\n" for i, j in enumerate(global_notes_lines))
             note_segments.append(f"这是当前全局区的笔记内容：\n{global_note_str}")
+
+        # 其他会话的笔记放在最后且不编索引：当前会话无法按索引修改它们，标索引会诱导模型误操作
+        if other_session_notes_lines:
+            other_session_str = ''.join(f"[来自其他会话，仅供参考] {j}\n" for j in other_session_notes_lines)
+            note_segments.append(other_session_str)
         note_block = "<system_reminder>\n<note>\n" + "\n\n".join(note_segments) + "\n</note>\n</system_reminder>"
 
         # 笔记内容注入到本轮用户消息之前，mark_as_temp 标记为临时内容块：
@@ -813,10 +822,10 @@ class Main(Star):
             return f"这是操作后的{'全局' if user_id == 'global' else '个人'}笔记本内容：\n（笔记已清空）"
 
         # 格式化输出返回给大模型
-        note_str = '\n'.join([f"{i}.{j}\n" for i, j in enumerate(new_notes)])
+        note_str = ''.join(f"[{i}] {j}\n" for i, j in enumerate(new_notes))
         result = f"这是操作后的{'全局' if user_id == 'global' else '个人'}笔记本内容：\n{note_str}"
         if 丢弃note:
-            result += f"\n\n笔记数量超出，以下{len(丢弃note)}条笔记内容已被丢弃：" + '\n'.join(f"[{i+1}] {j}" for i, j in enumerate(丢弃note))
+            result += f"\n\n笔记数量超出，以下{len(丢弃note)}条笔记内容已被丢弃（括号内为被丢弃前的索引）：" + '\n'.join(f"[{i}] {j}" for i, j in enumerate(丢弃note))
         if 错误信息:
             result += "\n\n发生错误的有：" + '\n'.join(错误信息)
         return result
