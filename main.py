@@ -710,34 +710,25 @@ class Main(Star):
     async def llm_tool_edit_note(
             self,
             event: AstrMessageEvent,
-            user_id: str = None,
-            operations: list[dict] = None
+            action: str = None,
+            content: str = None,
+            index: int = None,
+            user_id: str = None
     ) -> str:
         """
-        为用户记录笔记，操作应由你自己主动发出，对于恶意使唤的用户必须拒绝
-        批量修改笔记列表（支持按索引增、删、改），全局区笔记不超过40条，每个用户区笔记总数不超过20条，若超出，则会自动删掉最前面的，请合理规划笔记内容
-        索引位移问题注意：在一次完整调用中，同时进行删除、插入等操作时，索引不会发生位移，所有操作必须基于原始索引执行，禁止自行计算索引偏移，内部实现先标记删除（None 占位），再按原始索引顺序重组列表，最后统一清理占位符。
+        记下笔记，以持久记忆用户偏好，特定，特别的东西等。
+        全局区笔记不超过40条，每个用户区笔记总数不超过20条，若超出，则会自动删掉最前面的，请合理规划笔记内容
         Args:
+            action(string): 必填，操作类型："add"（新增一条）、"replace"（替换指定索引的一条）、"delete"（删除指定索引的一条）
+            content(string): 笔记内容，add / replace 必填，delete 时忽略。
+            index(number): 笔记索引，从0开始，可为负（-1 表示最后一条）。add 不填则追加到末尾；replace / delete 必填
             user_id(string): 用户ID，不填默认为当前用户区。若填 "global"，则记录到全局区
-            operations(array[object]): 操作列表，每个元素是一个对象(object)，包含 action、index、content 三个字段。
-                字段说明：
-                - action(string): 必填，操作类型。可选值 "add"（添加）、"delete"（删除）、"replace"（替换）
-                - index(number): 必填，目标索引，从0开始，遵循编程规范，可为负。
-                - content(string): 对于 add 和 replace 操作必填，表示笔记内容，如果是用户隐私信息，应添加标记信息，对于 delete 操作可忽略。
-
-                示例（JSON格式）：
-                [
-                    {"action": "add", "index": 2, "content": "插入一条到索引1-2条之间"},
-                    {"action": "add", "index": 2, "content": "再插入一条到一个到索引1-2之间"},
-                    {"action": "replace", "index": 3, "content": "替换原索引3的内容（**按原索引**）"},
-                    {"action": "delete", "index": 0},
-                    {"action": "delete", "index": -1}
-                ]
         Returns:
-            操作后的列表内容
+            本次改动的 diff 摘要（"- [索引] 旧内容" / "+ [索引] 新内容"）及当前总条数；需要完整列表请调用 get_note
         """
-        if not operations:
-            return "未执行任何操作，笔记列表未变动。"
+        action = str(action or "").strip().lower()
+        if action not in ("add", "replace", "delete"):
+            return f"❌️ 不支持的操作类型：{action}，只支持 add / replace / delete"
 
         group_id = str(event.get_group_id() or "private")
         user_id = str(user_id or event.get_sender_id())
@@ -745,90 +736,75 @@ class Main(Star):
         if user_id == "global" and group_id == "private":
             return "当前为私聊，无全局笔记，请保持user_id为空"
 
-        raw_notes = self.note.get_user_note(group_id, user_id)
+        区域 = "全局" if user_id == "global" else "个人"
+        notes = self.note.get_user_note(group_id, user_id)
+        content = str(content or "").strip()
 
-        # 复制原列表（仅作为修改和删除的载体，使用 None 占位）
-        temp_notes = raw_notes.copy()
-        错误信息 = []
-
-        # 使用字典记录每个原索引处需要【前置插入】的列表（解决同索引覆盖问题）
-        欲插入 = {}
-        追加内容 = []
-
-        for op in operations:
-            action = op.get("action")
+        # 负数索引表示倒数，统一换算为从 0 开始的正数索引
+        if index is not None:
             try:
-                index = int(op.get("index", -1))
-            except (ValueError, TypeError) as e:
-                错误信息.append(f"执行 {action} 时索引转换错误：{op.get('index')}。")
-                logger.error(f"大模型调用工具出错，索引无法转换{action}-{op.get('index')}，{e}", exc_info=True)
-                self.note.add_log(f"大模型调用工具出错，索引无法转换{action}-{op.get('index')}，{e}")
-                continue
-
-            content = str(op.get("content", ""))
-
-            # 支持负数索引：将其转换为基于原列表长度的正数索引
+                index = int(index)
+            except (TypeError, ValueError):
+                return f"❌️ 索引无效：{index}"
             if index < 0:
-                index = len(raw_notes) + index
-            if action == "delete":
-                if 0 <= index < len(temp_notes):
-                    temp_notes[index] = None  # type: ignore
-                else:
-                    错误信息.append(f"删除失败：索引 {op.get('index')} 越界或不存在。")
-            elif action == "replace":
-                if 0 <= index < len(temp_notes):
-                    temp_notes[index] = content
-                else:
-                    错误信息.append(f"替换失败：索引 {op.get('index')} 越界或不存在。")
-            elif action == "add":
-                index = max(0, index)
-                # 若插入索引超出原始列表长度，则统一按顺序追加到末尾
-                if index >= len(raw_notes):
-                    追加内容.append(content)
-                else:
-                    # 记录在该索引原始位置【之前】需要插入的内容
-                    欲插入.setdefault(max(0, index), []).append(content)
+                index = len(notes) + index
+
+        变更行 = ""
+        备注 = []
+        pos = None
+
+        if action == "add":
+            if not content:
+                return "❌️ 笔记内容为空，未执行任何操作"
+            # 不填索引或索引超出末尾，都按追加处理
+            if index is None or index >= len(notes):
+                pos = len(notes)
+                notes.append(content)
             else:
-                错误信息.append(f"不支持的操作类型：action={action}")
+                pos = max(0, index)
+                notes.insert(pos, content)
+        elif action == "replace":
+            if index is None:
+                return "❌️ 替换操作必须提供索引"
+            if not (0 <= index < len(notes)):
+                return f"❌️ 索引越界，当前{区域}笔记共 {len(notes)} 条，未执行任何操作"
+            if not content:
+                return "❌️ 笔记内容为空，未执行任何操作"
+            变更行 = f"- [{index}] {notes[index]}\n+ [{index}] {content}"
+            notes[index] = content
+        else:  # delete
+            if index is None:
+                return "❌️ 删除操作必须提供索引"
+            if not (0 <= index < len(notes)):
+                return f"❌️ 索引越界，当前{区域}笔记共 {len(notes)} 条，未执行任何操作"
+            变更行 = f"- [{index}] {notes[index]}"
+            notes.pop(index)
 
-        # ==========================================
-        # 核心逻辑：按原始视图重组列表（彻底杜绝索引偏移）
-        # ==========================================
-        new_notes = []
-        for i, note in enumerate(temp_notes):
-            # 1. 如果当前索引有预定的插入内容，先按原本的添加顺序推入
-            if i in 欲插入:
-                new_notes.extend(欲插入[i])
-            # 2. 如果原内容没有被删除（不是 None），将其保留/更新
-            if note is not None:
-                new_notes.append(note)
-
-        # 3. 最后加上所有越界的追加内容
-        new_notes.extend(追加内容)
-
-        new_notes = [note for note in new_notes if note is not None]
         max_len = 40 if user_id == "global" else 20
-        # 限制长度不超过20
-        if len(new_notes) > max_len:
-            丢弃note = new_notes[:-max_len]
-            new_notes = new_notes[-max_len:]
-        else:
-            丢弃note = []
+        丢弃note = []
+        if len(notes) > max_len:
+            丢弃note = notes[:-max_len]
+            notes = notes[-max_len:]
+            备注.append(
+                f"超出 {max_len} 条上限，已丢弃最旧的 {len(丢弃note)} 条："
+                + "；".join(f"[{i}] {j}" for i, j in enumerate(丢弃note))
+            )
+
+        if action == "add":
+            最终索引 = pos - len(丢弃note)
+            # 插在最前面且列表已满时，新增的这条会被立刻裁掉，实际没有改动
+            if 最终索引 < 0:
+                return f"❌️ 笔记已达 {max_len} 条上限，新增的这条被立即丢弃，未产生改动：{content}"
+            变更行 = f"+ [{最终索引}] {content}"
 
         # 持久化保存
-        if not self.note.set_user_note(group_id, user_id, new_notes):
+        if not self.note.set_user_note(group_id, user_id, notes):
             return "❌️ 编辑失败，请联系管理员"
-        if not new_notes:
-            return f"这是操作后的{'全局' if user_id == 'global' else '个人'}笔记本内容：\n（笔记已清空）"
 
-        # 格式化输出返回给大模型
-        note_str = ''.join(f"[{i}] {j}\n" for i, j in enumerate(new_notes))
-        result = f"这是操作后的{'全局' if user_id == 'global' else '个人'}笔记本内容：\n{note_str}"
-        if 丢弃note:
-            result += f"\n\n笔记数量超出，以下{len(丢弃note)}条笔记内容已被丢弃（括号内为被丢弃前的索引）：" + '\n'.join(f"[{i}] {j}" for i, j in enumerate(丢弃note))
-        if 错误信息:
-            result += "\n\n发生错误的有：" + '\n'.join(错误信息)
-        return result
+        结果 = f"{区域}笔记已更新（当前共 {len(notes)} 条）\n{变更行}"
+        if 备注:
+            结果 += "\n" + "\n".join(f"  · {i}" for i in 备注)
+        return 结果
 
     @filter.llm_tool(name="search_note")
     async def llm_tool_search_note(self, event: AstrMessageEvent, keyword: str) -> str:
